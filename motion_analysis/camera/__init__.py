@@ -8,6 +8,7 @@ from motion_analysis.camera.exceptions import (
     CameraReadError,
 )
 from motion_analysis.camera.realsense import RealSenseColorCamera
+from motion_analysis.camera.video import VideoFileSource
 
 __all__ = [
     "CameraError",
@@ -17,4 +18,5 @@ __all__ = [
     "FrameMetadata",
     "FrameSource",
     "RealSenseColorCamera",
+    "VideoFileSource",
 ]

@@ -1,40 +1,36 @@
-"""Configurable smoothing for 2D pixel keypoints.
+"""Configurable smoothing for valid 2D pixel keypoints.
 
-Raw MediaPipe landmarks jitter from detector noise, lighting, and small
-pose-model updates even when the person is standing still. An exponential
-moving average (EMA) reduces that frame-to-frame noise while keeping a
-separate copy of the raw coordinates.
+Raw MediaPipe landmarks jitter from detector noise even when a person is
+still. An exponential moving average (EMA) reduces that noise.
 
-Out-of-frame raw samples are not clamped. By default they also do not update
-the smoother, so an inferred foot below the image does not pull the filtered
-keypoint off-screen.
+Only valid observations update the filter: the landmark must be inside the
+current frame and pass the MediaPipe visibility threshold. If a joint
+temporarily becomes invalid, the last valid smoothed position is held in
+memory and is not drawn, so the skeleton does not jump or invent motion.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from motion_analysis.pose.exceptions import PoseDetectionError
 from motion_analysis.pose.landmarks import PixelKeypoint
-from motion_analysis.pose.validation import is_inside_frame
+from motion_analysis.pose.validation import is_inside_frame, is_visible_enough
 
 
 @dataclass(frozen=True)
 class SmoothingConfig:
-    """User-tunable 2D keypoint smoothing parameters.
+    """User-tunable landmark validity and smoothing parameters.
 
     Pass an instance into PoseEstimator rather than editing filter math
     inside the update function.
 
     Attributes:
-        enabled: If False, smoothed keypoints are copies of the raw values.
-        alpha: Weight of the new raw sample, in (0, 1]. Smaller values
-            reduce jitter more and add more lag. 0.35 is a live-camera default.
-        min_visibility: Raw samples below this visibility do not update the
-            filter. The previous smoothed position is held instead.
-        hold_when_out_of_frame: If True, out-of-frame raw samples do not
-            update the filter. The last in-frame smoothed position is held.
+        enabled: If False, smoothed keypoints copy raw values and flags.
+        alpha: Weight of the new valid raw sample, in (0, 1]. Smaller values
+            reduce jitter more and add more lag.
+        min_visibility: Minimum MediaPipe visibility/confidence required for
+            a landmark to be valid, drawn, or used to update the filter.
         reset_after_missing_frames: Clear filter history after this many
             consecutive frames with no person detected.
     """
@@ -42,7 +38,6 @@ class SmoothingConfig:
     enabled: bool = True
     alpha: float = 0.35
     min_visibility: float = 0.5
-    hold_when_out_of_frame: bool = True
     reset_after_missing_frames: int = 8
 
     def __post_init__(self) -> None:
@@ -63,11 +58,10 @@ class SmoothingConfig:
 
 
 class KeypointSmoother:
-    """Per-landmark EMA filter that keeps raw and smoothed coordinates.
+    """Per-landmark EMA filter that updates only on valid observations.
 
     Args:
-        config: Smoothing parameters. Stored on the instance so callers can
-            change behavior without editing this class.
+        config: Validity and smoothing parameters.
     """
 
     def __init__(self, config: SmoothingConfig | None = None) -> None:
@@ -96,7 +90,7 @@ class KeypointSmoother:
         frame_width: int,
         frame_height: int,
     ) -> list[PixelKeypoint]:
-        """Smooth one frame of raw pixel keypoints.
+        """Smooth valid raw keypoints and freeze invalid ones.
 
         Args:
             raw_keypoints: Validated pixel keypoints from the current frame.
@@ -104,81 +98,86 @@ class KeypointSmoother:
             frame_height: Current frame height in pixels.
 
         Returns:
-            Smoothed keypoints in the same landmark order. Raw values are not
-            modified.
+            Smoothed keypoints in the same order. Invalid landmarks keep
+            ``is_valid=False`` so they are not drawn. Raw values are unchanged.
 
         Raises:
             PoseDetectionError: If smoothing config or frame size is invalid.
         """
-        if not self.config.enabled:
-            return [
-                PixelKeypoint(
-                    name=keypoint.name,
-                    x=keypoint.x,
-                    y=keypoint.y,
-                    visibility=keypoint.visibility,
-                    in_frame=keypoint.in_frame,
-                )
-                for keypoint in raw_keypoints
-            ]
-
         self._missing_frames = 0
         smoothed: list[PixelKeypoint] = []
         for keypoint in raw_keypoints:
-            x, y = self._smooth_one(keypoint)
             smoothed.append(
-                PixelKeypoint(
-                    name=keypoint.name,
-                    x=x,
-                    y=y,
-                    visibility=keypoint.visibility,
-                    in_frame=is_inside_frame(x, y, frame_width, frame_height),
-                )
+                self._smooth_one(keypoint, frame_width, frame_height)
             )
         return smoothed
 
-    def _smooth_one(self, keypoint: PixelKeypoint) -> tuple[float, float]:
-        """Apply EMA to one landmark, or hold the previous value.
+    def _smooth_one(
+        self,
+        keypoint: PixelKeypoint,
+        frame_width: int,
+        frame_height: int,
+    ) -> PixelKeypoint:
+        """Update one landmark from a valid sample, or hold internal state.
 
         Args:
             keypoint: Raw validated keypoint for this landmark.
+            frame_width: Current frame width in pixels.
+            frame_height: Current frame height in pixels.
 
         Returns:
-            Smoothed ``(x, y)`` in pixels.
+            Smoothed PixelKeypoint. ``is_valid`` follows the current raw
+            observation so a dropped joint is not drawn as a frozen limb.
         """
         previous = self._state.get(keypoint.name)
-        if self._should_accept_raw(keypoint):
+
+        if not self.config.enabled:
+            return PixelKeypoint(
+                name=keypoint.name,
+                x=keypoint.x,
+                y=keypoint.y,
+                visibility=keypoint.visibility,
+                in_frame=keypoint.in_frame,
+                visible=keypoint.visible,
+                is_valid=keypoint.is_valid,
+            )
+
+        if keypoint.is_valid:
             if previous is None:
-                smoothed = (keypoint.x, keypoint.y)
+                smoothed_xy = (keypoint.x, keypoint.y)
             else:
                 alpha = self.config.alpha
-                smoothed = (
+                smoothed_xy = (
                     alpha * keypoint.x + (1.0 - alpha) * previous[0],
                     alpha * keypoint.y + (1.0 - alpha) * previous[1],
                 )
-            self._state[keypoint.name] = smoothed
-            return smoothed
+            self._state[keypoint.name] = smoothed_xy
+            x, y = smoothed_xy
+            in_frame = is_inside_frame(x, y, frame_width, frame_height)
+            visible = is_visible_enough(keypoint.visibility, self.config.min_visibility)
+            return PixelKeypoint(
+                name=keypoint.name,
+                x=x,
+                y=y,
+                visibility=keypoint.visibility,
+                in_frame=in_frame,
+                visible=visible,
+                is_valid=in_frame and visible,
+            )
 
+        # Invalid this frame: do not update the filter with a bad sample.
+        # Keep the last valid position internally, but mark the output invalid
+        # so drawing does not show a false frozen joint.
         if previous is not None:
-            return previous
-        # No history yet: report the raw estimate but do not seed the filter
-        # with an out-of-frame or low-visibility point.
-        return keypoint.x, keypoint.y
-
-    def _should_accept_raw(self, keypoint: PixelKeypoint) -> bool:
-        """Return whether this raw sample may update the filter.
-
-        Args:
-            keypoint: Raw validated keypoint.
-
-        Returns:
-            True if the sample is finite, visible enough, and optionally
-            inside the frame.
-        """
-        if not math.isfinite(keypoint.x) or not math.isfinite(keypoint.y):
-            return False
-        if keypoint.visibility < self.config.min_visibility:
-            return False
-        if self.config.hold_when_out_of_frame and not keypoint.in_frame:
-            return False
-        return True
+            x, y = previous
+        else:
+            x, y = keypoint.x, keypoint.y
+        return PixelKeypoint(
+            name=keypoint.name,
+            x=x,
+            y=y,
+            visibility=keypoint.visibility,
+            in_frame=is_inside_frame(x, y, frame_width, frame_height),
+            visible=False,
+            is_valid=False,
+        )

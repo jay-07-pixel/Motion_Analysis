@@ -15,3 +15,4 @@ venv/
 Thumbs.db
 *.task
 motion_analysis/pose/_models/
+motion_analysis/hands/_models/

@@ -49,11 +49,12 @@ class FrameSource(ABC):
         """
 
     @abstractmethod
-    def read(self) -> np.ndarray:
+    def read(self) -> np.ndarray | None:
         """Capture the next color frame.
 
         Returns:
-            A BGR image as a NumPy array with shape (height, width, 3).
+            A BGR image as a NumPy array with shape (height, width, 3), or
+            None when a finite source such as a video file has ended.
 
         Raises:
             CameraReadError: If a frame cannot be retrieved.
@@ -66,6 +67,20 @@ class FrameSource(ABC):
         Returns:
             Metadata reflecting the active stream, not hard-coded defaults.
         """
+
+    def last_frame_time_seconds(self) -> float | None:
+        """Return the timestamp of the last successful ``read()``.
+
+        Live cameras should use the device clock when the SDK provides one.
+        Video files should use the file's playback position, or
+        ``frame_index / FPS`` when the header reports a positive FPS.
+        Sources that have no clock may return None so the app can fall back
+        to a monotonic timer. FPS is never hard-coded here.
+
+        Returns:
+            Time in seconds, or None if this source has no timestamp yet.
+        """
+        return None
 
     @abstractmethod
     def close(self) -> None:

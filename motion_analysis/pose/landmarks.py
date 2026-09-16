@@ -108,10 +108,14 @@ class PixelKeypoint:
         name: Landmark name matching MediaPipe Pose.
         x: Horizontal pixel coordinate (column) in the current frame.
         y: Vertical pixel coordinate (row) in the current frame.
-        visibility: MediaPipe visibility score copied from the landmark.
+        visibility: MediaPipe visibility/confidence copied from the landmark.
         in_frame: True when (x, y) lies on a visible pixel of the current
             frame. Out-of-frame points keep their estimated x/y; they are
             not clamped onto the image border.
+        visible: True when MediaPipe visibility is at or above the configured
+            threshold.
+        is_valid: True only when the landmark is both in-frame and visible.
+            Invalid landmarks are not drawn and do not update smoothing.
     """
 
     name: str
@@ -119,6 +123,8 @@ class PixelKeypoint:
     y: float
     visibility: float
     in_frame: bool = False
+    visible: bool = False
+    is_valid: bool = False
 
 
 @dataclass(frozen=True)
@@ -129,9 +135,10 @@ class PoseFrame:
         frame_width: Width of the frame used for conversion, in pixels.
         frame_height: Height of the frame used for conversion, in pixels.
         normalized_landmarks: MediaPipe coordinates in the 0-1 image space.
-        raw_keypoints: Unfiltered pixel keypoints, including out-of-frame
-            estimates.
-        smoothed_keypoints: Filtered pixel keypoints used for display.
+        raw_keypoints: Unfiltered pixel keypoints, including invalid
+            estimates that are kept internally.
+        smoothed_keypoints: Filtered pixel keypoints. Only those with
+            ``is_valid`` should be drawn or displayed.
     """
 
     frame_width: int
@@ -187,12 +194,13 @@ def extract_landmarks(pose_landmarks: object) -> list[NormalizedLandmark]:
         visibility = getattr(landmark, "visibility", None)
         if visibility is None:
             visibility = getattr(landmark, "presence", None)
+        # Missing visibility is treated as 0 so an unknown joint is not drawn.
         extracted.append(
             NormalizedLandmark(
                 name=name,
                 x=float(landmark.x),
                 y=float(landmark.y),
-                visibility=float(visibility) if visibility is not None else 1.0,
+                visibility=float(visibility) if visibility is not None else 0.0,
             )
         )
     return extracted

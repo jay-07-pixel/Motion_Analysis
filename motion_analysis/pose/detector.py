@@ -234,7 +234,12 @@ class PoseEstimator:
         frame_height, frame_width = frame_bgr.shape[:2]
         normalized = extract_landmarks(pose_landmarks)
         converted = convert_to_pixel_coordinates(normalized, frame_width, frame_height)
-        raw = validate_pixel_keypoints(converted, frame_width, frame_height)
+        raw = validate_pixel_keypoints(
+            converted,
+            frame_width,
+            frame_height,
+            min_visibility=self.smoothing.min_visibility,
+        )
         smoothed = self._smoother.update(raw, frame_width, frame_height)
         return PoseFrame(
             frame_width=frame_width,
@@ -243,6 +248,14 @@ class PoseEstimator:
             raw_keypoints=raw,
             smoothed_keypoints=smoothed,
         )
+
+    def reset_tracking(self) -> None:
+        """Clear EMA history without reloading the pose model.
+
+        Call this when an uploaded video restarts so the previous clip does
+        not pull the first frames of the new playback.
+        """
+        self._smoother.reset()
 
     def close(self) -> None:
         """Close the underlying MediaPipe Pose detector."""

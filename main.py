@@ -1,4 +1,4 @@
-"""Launch live RGB capture from an Intel RealSense camera."""
+"""Launch 2D motion analysis from a live camera or uploaded video."""
 
 from motion_analysis.app import main
 

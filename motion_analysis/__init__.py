@@ -2,8 +2,9 @@
 
 The live pipeline is:
 
-    RealSense D455F -> RGB frame -> MediaPipe Pose -> raw pixels ->
-    in-frame validation -> EMA smoothing -> display
+    RealSense D455F or uploaded video -> RGB frame ->
+    shared Pose + Hands pipeline -> 2D pixel keypoints ->
+    position, displacement, and distance travelled
 """
 
 __version__ = "0.1.0"

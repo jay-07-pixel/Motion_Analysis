@@ -2,17 +2,33 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from collections import deque
 from time import perf_counter
-from typing import Deque, Optional
+from typing import Deque, Optional, Sequence
 
 import cv2
 import numpy as np
 
 from motion_analysis.camera.base import FrameMetadata
 
-WINDOW_NAME = "2D Motion Analysis - Live RGB Pose"
+WINDOW_NAME = "2D Motion Analysis - Pose + Hands"
 _QUIT_KEYS = {ord("q"), ord("Q"), 27}  # 27 is the Escape key
+_PAUSE_KEYS = {ord(" "), ord("p"), ord("P")}
+_RESTART_KEYS = {ord("r"), ord("R")}
+_PREV_LANDMARK_KEYS = {ord("["), ord(",")}
+_NEXT_LANDMARK_KEYS = {ord("]"), ord(".")}
+
+
+class ViewerAction(Enum):
+    """User action from the OpenCV preview window."""
+
+    CONTINUE = "continue"
+    QUIT = "quit"
+    TOGGLE_PAUSE = "toggle_pause"
+    RESTART = "restart"
+    PREV_LANDMARK = "prev_landmark"
+    NEXT_LANDMARK = "next_landmark"
 
 
 class DisplayFpsTracker:
@@ -57,30 +73,45 @@ class LiveRgbViewer:
         self._fps_tracker = DisplayFpsTracker()
         self._window_created = False
 
-    def show(self, frame: np.ndarray, metadata: FrameMetadata) -> bool:
-        """Render one frame and report whether the user asked to quit.
+    def show(
+        self,
+        frame: np.ndarray,
+        metadata: FrameMetadata,
+        extra_lines: Optional[Sequence[str]] = None,
+        wait_ms: int = 1,
+    ) -> ViewerAction:
+        """Render one frame and report the user's window action.
 
         Args:
             frame: BGR image from the active frame source.
-            metadata: Actual stream resolution and FPS from the camera.
+            metadata: Actual stream resolution and FPS from the source.
+            extra_lines: Optional overlay rows such as video time and controls.
+            wait_ms: OpenCV waitKey delay in milliseconds. Video playback
+                uses the file FPS; live camera uses 1.
 
         Returns:
-            True if the viewer should keep running, False if the user pressed
-            Q, Escape, or closed the window.
+            ViewerAction describing continue, pause, restart, or quit.
         """
         display_fps = self._fps_tracker.tick()
-        annotated = _annotate_frame(frame, metadata, display_fps)
+        annotated = _annotate_frame(frame, metadata, display_fps, extra_lines)
         if not self._window_created:
             cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
             self._window_created = True
         cv2.imshow(self.window_name, annotated)
-        key = cv2.waitKey(1) & 0xFF
+        key = cv2.waitKey(max(1, wait_ms)) & 0xFF
         if key in _QUIT_KEYS:
-            return False
-        # OpenCV reports -1.0 for both axes after the user closes the window.
+            return ViewerAction.QUIT
+        if key in _PAUSE_KEYS:
+            return ViewerAction.TOGGLE_PAUSE
+        if key in _RESTART_KEYS:
+            return ViewerAction.RESTART
+        if key in _PREV_LANDMARK_KEYS:
+            return ViewerAction.PREV_LANDMARK
+        if key in _NEXT_LANDMARK_KEYS:
+            return ViewerAction.NEXT_LANDMARK
         if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1:
-            return False
-        return True
+            return ViewerAction.QUIT
+        return ViewerAction.CONTINUE
 
     def close(self) -> None:
         """Destroy the OpenCV window."""
@@ -94,25 +125,33 @@ def _annotate_frame(
     frame: np.ndarray,
     metadata: FrameMetadata,
     display_fps: float,
+    extra_lines: Optional[Sequence[str]] = None,
 ) -> np.ndarray:
     """Draw source name, resolution, and FPS onto a copy of the frame.
 
     Args:
         frame: Original BGR image.
-        metadata: Camera-reported stream properties.
+        metadata: Source-reported stream properties.
         display_fps: Measured rendering rate for this viewer.
+        extra_lines: Optional extra overlay rows.
 
     Returns:
         Annotated BGR image ready for imshow.
     """
     annotated = frame.copy()
+    fps_label = (
+        f"Source FPS: {metadata.stream_fps:.1f}"
+        if metadata.stream_fps > 0
+        else "Source FPS: unknown"
+    )
     lines = [
         metadata.source_name,
         f"Resolution: {metadata.width} x {metadata.height}",
-        f"Camera FPS: {metadata.stream_fps:.1f}",
+        fps_label,
         f"Display FPS: {display_fps:.1f}",
-        "Press Q or Esc to quit",
     ]
+    if extra_lines:
+        lines.extend(extra_lines)
     padding = 8
     line_height = 22
     font = cv2.FONT_HERSHEY_SIMPLEX

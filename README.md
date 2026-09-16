@@ -1,22 +1,32 @@
 # 2D Motion Analysis
 
-Live RGB capture and 2D human pose detection for a motion analysis system built around an Intel RealSense D455f camera.
+Live RGB capture or uploaded-video analysis with 2D body pose and 21-point hand landmarks, built around an Intel RealSense D455f camera.
 
 Current pipeline:
 
-**RealSense D455F → RGB frame → MediaPipe Pose → raw pixel keypoints → validate in-frame → EMA smoothing → display smoothed skeleton**
+```text
+Live D455F ─┐
+            ├──→ Common Frame Processing → 2D Keypoints (x, y)
+Video File ─┘                │
+                             └──→ Position, Displacement, Distance travelled
+```
 
-The live overlay shows both **raw** and **smoothed** pixel coordinates so you can compare stability. Depth, 3D coordinates, velocity, acceleration, joint angles, trajectories, uploaded video, and a custom UI are not included yet.
+The shared path after a frame is available is always:
+
+**RGB → Pose + Hands → validation → smoothing → 2D pixel keypoints → 2D motion measurements**
+
+Live camera and uploaded video use that path identically. Depth, 3D, velocity, acceleration, joint angles, and trajectories are not included yet.
 
 ## Project purpose
 
-- Automatically detect a connected Intel RealSense camera
-- Stream live RGB without hard-coded resolution or FPS
-- Run MediaPipe Pose on each RGB frame
-- Convert normalized MediaPipe landmarks into 2D pixel coordinates using the current frame size
-- Validate those pixels against the live frame without clamping off-screen joints
-- Smooth raw keypoints with a configurable EMA filter while keeping the raw values
-- Draw the smoothed pose skeleton and a raw-vs-smoothed coordinate readout
+- Choose **Live Camera** (RealSense D455F) or **Upload Video**
+- Stream live RGB or read an uploaded file without hard-coded paths, resolution, or FPS
+- Run the same MediaPipe Pose and Hands pipeline on every RGB frame
+- Convert body and hand landmarks into 2D pixel coordinates using the current frame size
+- Treat a landmark as valid only when it is inside the live frame and MediaPipe visibility passes a threshold
+- Smooth valid keypoints with a configurable EMA filter while keeping raw values internally
+- Draw the body skeleton plus all visible finger landmarks and connections
+- Let the user pick a body or hand landmark and measure its 2D motion
 - Shut down the camera, pose model, and OpenCV window cleanly
 
 ## Requirements
@@ -30,7 +40,8 @@ The live overlay shows both **raw** and **smoothed** pixel coordinates so you ca
 **Software**
 
 - Python 3.10 or newer (MediaPipe currently supports 3.10–3.12 best)
-- Intel RealSense SDK 2.0 (Librealsense)
+- Intel RealSense SDK 2.0 (Librealsense) for live camera mode
+- Tkinter (included with most Python installers; used for the start menu and file picker)
 - Python packages listed in `requirements.txt`:
   - `pyrealsense2`
   - `opencv-python`
@@ -60,7 +71,7 @@ The live overlay shows both **raw** and **smoothed** pixel coordinates so you ca
    pip install -r requirements.txt
    ```
 
-The first time you run the program, it downloads Google's official Pose Landmarker model into `motion_analysis/pose/_models/` and reuses that cache afterward. No camera-specific or machine-specific file paths are hard-coded.
+The first time you run the program, it downloads Google's official Pose Landmarker and Hand Landmarker models into `motion_analysis/pose/_models/` and `motion_analysis/hands/_models/`, then reuses those caches. No camera-specific or machine-specific file paths are hard-coded.
 
 ## How to run the program
 
@@ -76,64 +87,93 @@ Or:
 python -m motion_analysis
 ```
 
-Press **Q** or **Esc** in the video window to stop capture and release the camera and pose detector. Closing the window also shuts everything down.
+A start screen offers two buttons:
+
+- **Live Camera** — detect the connected RealSense D455F and process its RGB stream
+- **Upload Video** — open a file picker and process the selected video
+
+After you choose an input, a landmark list appears. Pick the body or hand joint to analyse (default `LEFT_WRIST`). You can change it later with **[** and **]** in the video window.
+
+No video path is hard-coded. Closing the start screen exits the program. After a session ends, the start screen returns so you can switch inputs.
+
+### Live Camera
+
+- Requires a connected D455F on USB 3
+- Press **Q** or **Esc** to stop and return to the start screen
+
+### Upload Video
+
+1. Click **Upload Video** and choose a file (MP4, AVI, MOV, MKV, and similar)
+2. The app reads that file's actual width, height, FPS, frame count, and duration
+3. Controls:
+   - **Space** — pause / play
+   - **R** — restart from the first frame
+   - **Q** or **Esc** — exit to the start screen
+
+The overlay shows the current frame number, time, source FPS, and play/pause state. At the end of the file, playback pauses on the last frame; press **R** to restart. Restart also clears smoothing history and motion totals.
+
+Both modes show the selected landmark, its current smoothed position, displacement from the first valid sample, and distance travelled.
 
 ## How 2D keypoints are extracted
 
-MediaPipe Pose does **not** return pixel coordinates. Each landmark comes back in **normalized image coordinates**:
+### MediaPipe normalized coordinates
 
-- `x` is a fraction of the current image width, typically in `[0.0, 1.0]`
-- `y` is a fraction of the current image height, typically in `[0.0, 1.0]`
+MediaPipe Pose and MediaPipe Hands do **not** return pixel coordinates. Each landmark comes back in **normalized image coordinates**:
 
-Those values are stored as `NormalizedLandmark` objects and are only an intermediate MediaPipe format.
+- `x` is a fraction of the current image width
+- `y` is a fraction of the current image height
+- those values are often in `[0.0, 1.0]`, but they can go outside that range
 
-The motion-analysis system converts them with the **actual current frame size**:
+Normalized `x` and `y` are stored as `NormalizedLandmark` objects. They are an intermediate MediaPipe format, not the coordinates used by this motion-analysis system.
+
+### Conversion to pixel coordinates
+
+The system converts with the **actual current frame size**:
 
 ```text
 pixel_x = normalized_x * frame_width
 pixel_y = normalized_y * frame_height
 ```
 
-`frame_width` and `frame_height` are read from the live RGB frame (`frame.shape[1]` and `frame.shape[0]`). They are not hard-coded as 1280×720 or any other resolution.
+`frame_width` and `frame_height` come from the live RGB frame (`frame.shape[1]` and `frame.shape[0]`). They are never hard-coded as 1280×720 or any other resolution. Live camera and uploaded video both use this conversion on whatever size the current frame actually has.
 
-The converted values are `PixelKeypoint` objects:
+The converted values are `PixelKeypoint` objects with:
 
 - `name`: landmark name, for example `LEFT_SHOULDER`
-- `x`: pixel column in the current RGB frame
-- `y`: pixel row in the current RGB frame
-- `in_frame`: whether that pixel actually lies on the image
+- `x`, `y`: pixel coordinates
+- `visibility`: MediaPipe visibility/confidence
+- `is_valid`: whether the landmark may be drawn and used for smoothing
 
-**Use smoothed `PixelKeypoint` values for display.** Raw values stay available on `PoseFrame.raw_keypoints`. Do not treat MediaPipe's normalized `x` and `y` as pixels.
+Raw converted values are kept on `PoseFrame.raw_keypoints`. Smoothed values are kept on `PoseFrame.smoothed_keypoints`.
 
-## Why raw keypoints fluctuate
+### Landmark visibility/confidence
 
-MediaPipe re-estimates every joint on every frame. Even if you stand still, the detector's confidence, lighting, compression, and small model updates move the landmark by a few pixels. That jitter is measurement noise, not real motion. Using those raw points directly would make later velocity or angle calculations look noisy.
+MediaPipe also reports a **visibility** score in `[0, 1]`. This is the model's confidence that the joint is present and unoccluded.
 
-## How coordinates are validated
+A landmark is **valid** only when both checks pass:
 
-MediaPipe's normalized `x` and `y` are **not guaranteed to stay in `[0, 1]`**. If a foot is cut off at the bottom of the camera, or the model infers a joint just beyond the image, `normalized_y` can be `1.05`. On a 720-pixel-tall frame that becomes:
+1. Pixel coordinates are inside the current frame: `0 <= x < width` and `0 <= y < height`
+2. `visibility >= min_visibility` (default `0.50`, set on `SmoothingConfig`)
+
+Low-visibility joints are treated as invalid even if their predicted `(x, y)` sits inside the image. That stops occluded or guessed limbs from being drawn.
+
+### Why out-of-frame landmarks are rejected
+
+If a foot is cut off at the bottom of the camera, or the model infers a joint just beyond the image, `normalized_y` can be `1.05`. On a 720-pixel-tall frame:
 
 ```text
 pixel_y = 1.05 * 720 = 756
 ```
 
-which is greater than 720. That is not a conversion bug.
+which is outside the image. Visible pixels occupy `[0, width) x [0, height)`, so `y == 720` is already past the last row.
 
-Visible pixels occupy `[0, width) x [0, height)`. A point with `y == 720` on a 720-tall image is already outside the last row (row index 719).
+Those estimates are **not clamped** onto the border. Clamping would invent a false on-screen joint and make the skeleton stick to the edge. Instead the landmark is marked invalid, omitted from the drawing, and omitted from the on-screen coordinate list.
 
-Validation therefore:
+### Why smoothing is used
 
-1. Converts with the **current** `frame.shape` width and height
-2. Marks `in_frame = True` only when `0 <= x < width` and `0 <= y < height`
-3. **Does not clamp** out-of-frame points onto the border, because clamping would invent a false on-screen joint
-4. Skips out-of-frame landmarks when drawing the skeleton
-5. By default, does not let out-of-frame raw samples update the smoother
+MediaPipe re-estimates every joint on every frame. Even if you stand still, detector noise moves the landmark by a few pixels. That jitter is not real motion.
 
-The overlay labels these points `OUT y>=h` (or `x<0`, `x>=w`, `y<0`) next to the raw coordinate.
-
-## What smoothing does
-
-An exponential moving average (EMA) blends each new raw sample with the previous smoothed position:
+An exponential moving average (EMA) blends each **valid** raw sample with the previous smoothed position:
 
 ```text
 smoothed = alpha * raw + (1 - alpha) * previous_smoothed
@@ -141,51 +181,158 @@ smoothed = alpha * raw + (1 - alpha) * previous_smoothed
 
 - Smaller `alpha` → less jitter, more lag
 - Larger `alpha` → follows motion faster, more residual noise
-- Default `alpha = 0.35`
+- Default `alpha = 0.35`, set on `SmoothingConfig`
 
-Change this by passing a `SmoothingConfig` into `PoseEstimator`. The values are not hard-coded inside the filter math.
+Smoothing runs **only on valid observations**. If a landmark is briefly out of frame or low-visibility, the last valid smoothed position is held internally and **not drawn**, so the skeleton does not jump or fake a movement. When the joint becomes valid again, filtering resumes from that held state.
 
-Both series are kept:
-
-- `PoseFrame.raw_keypoints` — unfiltered detector output
-- `PoseFrame.smoothed_keypoints` — EMA output used for the cyan skeleton
-
-If a raw joint is out of frame or low-visibility, the filter **holds** the last in-frame smoothed position instead of following the invalid estimate off-screen.
-
-The live overlay prints both so you can compare stability:
+The overlay prints only valid smoothed pixels, for example:
 
 ```text
-L.ANK  r=(610.2,742.8) OUT y>=h  s=(608.1,715.2) IN
+L.SH  (502.3, 210.1)  vis=0.97
+L.ANK: hidden (out of frame)
 ```
 
-`r=` is raw. `s=` is smoothed. Red dots on the video are raw in-frame joints; the cyan skeleton is smoothed.
+## Hand and finger landmarks (21 per hand)
 
-The live overlay also still shows MediaPipe normalized values only as an explanation in the README; the on-screen panel now compares raw vs smoothed **pixels**.
+MediaPipe Hands runs on the same live RGB frame as body pose. It can detect **both left and right hands**. Each detected hand has **21 landmarks**:
+
+| Name | Meaning |
+| --- | --- |
+| `WRIST` | Wrist |
+| `THUMB_CMC`, `THUMB_MCP`, `THUMB_IP`, `THUMB_TIP` | Thumb base to tip |
+| `INDEX_MCP`, `INDEX_PIP`, `INDEX_DIP`, `INDEX_TIP` | Index finger |
+| `MIDDLE_MCP`, `MIDDLE_PIP`, `MIDDLE_DIP`, `MIDDLE_TIP` | Middle finger |
+| `RING_MCP`, `RING_PIP`, `RING_DIP`, `RING_TIP` | Ring finger |
+| `PINKY_MCP`, `PINKY_PIP`, `PINKY_DIP`, `PINKY_TIP` | Little finger |
+
+Those names are stored on each `PixelKeypoint` and drawn next to the joint on the video.
+
+### 2D pixel-coordinate extraction for hands
+
+Hand landmarks use the same conversion as the body:
+
+```text
+pixel_x = normalized_x * frame_width
+pixel_y = normalized_y * frame_height
+```
+
+`frame_width` and `frame_height` come from the current RGB frame. They are not hard-coded.
+
+Each hand keeps:
+
+- `raw_keypoints` — unfiltered detector pixels
+- `smoothed_keypoints` — EMA output used for drawing
+
+A finger landmark is drawn only when it is inside the live frame and passes the visibility/confidence threshold. Out-of-frame points are **not clamped**. If a fingertip is briefly lost, smoothing holds the last valid position internally and does not draw a fake jump.
+
+The live overlay lists wrist and fingertip pixels for each hand, for example:
+
+```text
+Left  21/21  score=0.97
+  INDEX_TIP  (812.4, 410.2)  vis=1.00
+Right  18/21  score=0.91
+  PINKY_TIP: hidden (out of frame)
+```
+
+## 2D motion measurements
+
+After smoothing, every valid tracked keypoint is measured in **pixel coordinates**. The overlay shows the landmark you selected; internally the same formulas run for all body and hand joints.
+
+Calculations use **smoothed** `(x, y)` only. Raw detector pixels stay available internally for comparison. They are not used for displacement or distance travelled.
+
+### Formulas
+
+**Position** is the current smoothed location:
+
+```text
+P = (x, y)
+```
+
+**Displacement** is the straight-line change from the first valid sample of that landmark, not the path length:
+
+```text
+ΔP = P_current - P_initial
+ΔP = (x_current - x_initial, y_current - y_initial)
+```
+
+**2D displacement magnitude**:
+
+```text
+|ΔP| = sqrt((x_current - x_initial)^2 + (y_current - y_initial)^2)
+```
+
+**Distance travelled** is the sum of movement between consecutive valid frames:
+
+```text
+d_i = sqrt((x_i - x_{i-1})^2 + (y_i - y_{i-1})^2)
+distance travelled = d_1 + d_2 + ... + d_n
+```
+
+`P_initial` is the first valid smoothed position after the session starts (or after a video restart). Distance travelled starts at `0` on that sample.
+
+### Invalid and missing landmarks
+
+A landmark must be valid on the current frame before movement is calculated: in-frame and above the visibility threshold, using the same rules as skeleton drawing.
+
+- If the joint is missing, out of frame, or low-confidence, **position and displacement are not calculated** for that frame.
+- Distance travelled is **not increased**. A gap does not add a teleport from the last seen location.
+- When the joint becomes valid again, tracking resumes from the new position. Held path length is unchanged across the gap.
+
+### Timestamps and FPS
+
+Frame time comes from the active source:
+
+- Live D455F: RealSense color-frame timestamp when the SDK provides one
+- Uploaded video: file playback position, or `frame_index / source_FPS` when the header reports FPS
+- If the source has no clock, a monotonic timer is used instead of assuming 30 FPS
+
+Source FPS is read from the live stream profile or the video file header. It is never hard-coded. The motion panel prints that FPS next to the frame timestamp.
+
+### Selecting a landmark
+
+1. After **Live Camera** or **Upload Video**, choose a joint from the list (Body, Left Hand, Right Hand).
+2. During a session, press **[** or **,** for the previous landmark and **]** or **.** for the next.
+3. The magenta ring marks the joint being measured. Switching the overlay target does not reset other joints' totals. **R** on an uploaded video restarts the file and clears all motion totals.
+
+The bottom-left overlay shows:
+
+```text
+Landmark: Body · LEFT_WRIST
+t = 3.210s   source FPS = 30.00
+Position P = (502.3, 210.1) px
+Displacement ΔP = (-12.4, 8.1) px
+|ΔP| = 14.8 px
+Distance travelled = 203.5 px
+```
+
+Velocity, acceleration, angles, and 3D are not computed in this step.
+
+
 
 ## Expected output
 
 The terminal prints the detected camera and confirms Pose is ready:
 
 ```text
-Connected: Intel RealSense D455 (XXXXXXXX)
+Select input
+[Live Camera]  [Upload Video]
+```
+
+For live camera:
+
+```text
+Source: Intel RealSense D455 (XXXXXXXX)
 Resolution: 1280 x 720
-Camera FPS: 30.0
-MediaPipe Pose ready. Display uses smoothed pixel keypoints.
-Smoothing: EMA alpha=0.35, hold_out_of_frame=True.
+Source FPS: 30.0
+MediaPipe Pose and Hands ready. Both inputs share one 2D pipeline.
 Press Q or Esc in the video window to quit.
 ```
 
-An OpenCV window titled **2D Motion Analysis - Live RGB Pose** shows:
+For an uploaded video, resolution and FPS come from the file header (not 1280×720). The window also shows frame number, time, and **Space / R / Q** controls.
 
-- The live RGB video
-- Camera name, serial number, actual stream resolution, and FPS (top-left)
-- The **smoothed** pose skeleton in cyan
-- Raw in-frame joints as small red dots, so leftover jitter is visible
-- A readout of useful body landmarks with **raw vs smoothed** pixel coordinates
-- `OUT` labels when a raw estimate is outside the current frame
-- `No person detected` when nobody is in view
+Both modes draw the same overlays: body skeleton, 21-point hands, valid 2D pixel coordinates, and the selected landmark's position, displacement, and distance travelled.
 
-Stand in front of the camera so the full body is visible. Shoulders, elbows, wrists, hips, knees, and ankles should track on the skeleton, and the overlay should list their pixel `(x, y)` values.
+Stand in front of the camera so the full body is visible, and hold your hands in view for finger tracking. For uploaded video, keep the person and hands clearly in shot.
 
 If no camera is connected, the program exits with a clear error instead of opening a blank window.
 
@@ -208,9 +355,15 @@ If no camera is connected, the program exits with a clear error instead of openi
 | --- | --- | --- |
 | `MediaPipe is not installed` | Pose dependency missing | Run `pip install -r requirements.txt` inside the virtual environment. |
 | `Could not download the MediaPipe Pose Landmarker model` | First run has no internet | Connect to the internet once so the official `.task` model can be cached, then rerun. |
+| `Could not download the MediaPipe Hand Landmarker model` | First run has no internet | Same as above; the hands model is cached under `motion_analysis/hands/_models/`. |
+| Could not open the selected video file | Unsupported codec or corrupt file | Try MP4 (H.264) or another OpenCV-readable format. |
+| Overlay shows `Source FPS: unknown` | The file header did not report FPS | Playback still runs; frame numbers still update. |
 | Overlay shows `No person detected` | Person too close, too far, or poorly lit | Step back so more of the body is visible and add more light. |
-| Overlay shows `OUT y>=h` or similar | Joint is off-screen or inferred beyond the image | Step back so the full body fits. The estimate is kept but not clamped or drawn as an on-screen joint. |
-| Skeleton jitter or missing limbs | Occlusion, low visibility, or raw (unsmoothed) noise | Face the camera and keep joints in view. Lower `SmoothingConfig.alpha` for more filtering. |
-| Coordinates look wrong for the image size | Using normalized values as pixels | Use the `px=` values. `norm=` is MediaPipe's 0–1 space and is not a pixel location. |
+| Overlay shows `hidden (out of frame)` | Joint is off-screen or inferred beyond the image | Step back so the full body fits. The estimate is kept internally but not drawn or clamped. |
+| Overlay shows `hidden (vis …)` | MediaPipe visibility is below the threshold | Improve lighting, face the camera, and keep the joint unoccluded. Lower `SmoothingConfig.min_visibility` only if needed. |
+| Skeleton jitter or missing limbs | Occlusion, low visibility, or residual detector noise | Keep joints in view. Lower `SmoothingConfig.alpha` for more filtering. |
+| Coordinates look wrong for the image size | Using MediaPipe normalized values as pixels | Use the on-screen valid pixel `(x, y)` values. Normalized MediaPipe coordinates are not pixels. |
+| Overlay shows `Position: not calculated` | Selected joint is missing, out of frame, or low-visibility | Bring that landmark into view. Distance travelled is held, not increased. |
+| Displacement stays near 0 while distance grows | The joint returned close to its start point after moving | Expected: `|ΔP|` is straight-line from the first valid sample; distance travelled is path length. |
 
-After any camera or pose initialization error the program stops the RealSense pipeline, closes MediaPipe Pose, and closes OpenCV windows so the device is not left locked.
+After any camera, pose, or hands initialization error the program stops the RealSense pipeline, closes MediaPipe, and closes OpenCV windows so the device is not left locked.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Optional
 
 import cv2
@@ -45,6 +46,7 @@ class RealSenseColorCamera(FrameSource):
         self._device_info: Optional[RealSenseDeviceInfo] = None
         self._metadata: Optional[FrameMetadata] = None
         self._color_format: Optional[rs.format] = None
+        self._last_frame_time_seconds: Optional[float] = None
 
     def open(self) -> FrameMetadata:
         """Detect the camera if needed and start the RGB/color stream.
@@ -117,8 +119,22 @@ class RealSenseColorCamera(FrameSource):
         if not color_frame:
             raise CameraReadError("The RealSense pipeline returned no color frame.")
 
+        try:
+            self._last_frame_time_seconds = float(color_frame.get_timestamp()) / 1000.0
+        except (AttributeError, TypeError, ValueError):
+            self._last_frame_time_seconds = perf_counter()
+
         image = np.asanyarray(color_frame.get_data())
         return _to_bgr(image, self._color_format)
+
+    def last_frame_time_seconds(self) -> Optional[float]:
+        """Return the RealSense timestamp of the last color frame.
+
+        Returns:
+            Device timestamp in seconds, or a monotonic fallback captured
+            during ``read()``. None if no frame has been read yet.
+        """
+        return self._last_frame_time_seconds
 
     def get_metadata(self) -> FrameMetadata:
         """Return the active color stream resolution and FPS.
@@ -146,6 +162,7 @@ class RealSenseColorCamera(FrameSource):
         self._context = None
         self._metadata = None
         self._color_format = None
+        self._last_frame_time_seconds = None
 
     def _read_stream_metadata(self, profile: rs.pipeline_profile) -> FrameMetadata:
         """Extract actual color resolution, FPS, and pixel format.

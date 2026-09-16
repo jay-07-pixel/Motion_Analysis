@@ -13,7 +13,7 @@ from motion_analysis.pose.landmarks import (
     PoseFrame,
 )
 from motion_analysis.pose.smoothing import SmoothingConfig
-from motion_analysis.pose.validation import count_out_of_frame, describe_frame_position
+from motion_analysis.pose.validation import count_valid, describe_invalid_reason
 
 # Official MediaPipe Pose skeleton edges, stored as landmark names.
 POSE_SKELETON_CONNECTIONS: tuple[tuple[str, str], ...] = (
@@ -56,34 +56,26 @@ POSE_SKELETON_CONNECTIONS: tuple[tuple[str, str], ...] = (
 
 _SMOOTHED_SKELETON_COLOR = (0, 255, 255)
 _SMOOTHED_JOINT_COLOR = (0, 215, 255)
-_RAW_JOINT_COLOR = (0, 0, 255)
 _LABEL_COLOR = (255, 255, 255)
-_MIN_VISIBILITY = 0.5
 
 
 def draw_pose_skeleton(
     frame: np.ndarray,
     keypoints: list[PixelKeypoint],
-    min_visibility: float = _MIN_VISIBILITY,
 ) -> np.ndarray:
-    """Draw the pose skeleton from in-frame pixel keypoints.
+    """Draw the pose skeleton from currently valid pixel keypoints.
 
-    Out-of-frame landmarks are skipped instead of being clamped onto the
-    image edge.
+    A bone is drawn only when both endpoints are valid. Invalid joints are
+    skipped instead of being clamped onto the image edge.
 
     Args:
         frame: BGR image to draw on. Modified in place.
         keypoints: 2D landmarks already converted to pixel coordinates.
-        min_visibility: Landmarks below this score are skipped.
 
     Returns:
         The same frame, with joints and bones drawn.
     """
-    points = {
-        keypoint.name: keypoint
-        for keypoint in keypoints
-        if keypoint.visibility >= min_visibility and keypoint.in_frame
-    }
+    points = {keypoint.name: keypoint for keypoint in keypoints if keypoint.is_valid}
     for start_name, end_name in POSE_SKELETON_CONNECTIONS:
         start = points.get(start_name)
         end = points.get(end_name)
@@ -109,42 +101,16 @@ def draw_pose_skeleton(
     return frame
 
 
-def draw_raw_keypoints(
-    frame: np.ndarray,
-    keypoints: list[PixelKeypoint],
-    min_visibility: float = _MIN_VISIBILITY,
-) -> np.ndarray:
-    """Draw unfiltered in-frame joints as small red dots for jitter comparison.
-
-    Args:
-        frame: BGR image to draw on. Modified in place.
-        keypoints: Raw pixel keypoints.
-        min_visibility: Landmarks below this score are skipped.
-
-    Returns:
-        The same frame, with raw joints drawn.
-    """
-    for keypoint in keypoints:
-        if keypoint.visibility < min_visibility or not keypoint.in_frame:
-            continue
-        cv2.circle(
-            frame,
-            _as_drawing_point(keypoint),
-            3,
-            _RAW_JOINT_COLOR,
-            1,
-            cv2.LINE_AA,
-        )
-    return frame
-
-
 def draw_landmark_coordinates(
     frame: np.ndarray,
     pose_frame: PoseFrame,
     landmark_names: tuple[str, ...] = TEST_LANDMARK_NAMES,
     smoothing: Optional[SmoothingConfig] = None,
 ) -> np.ndarray:
-    """Overlay raw vs smoothed pixel coordinates for live stability checks.
+    """Overlay valid smoothed pixel coordinates for live testing.
+
+    Invalid landmarks are listed by reason only. Their out-of-frame or
+    low-confidence coordinates are not shown.
 
     Args:
         frame: BGR image to draw on. Modified in place.
@@ -159,40 +125,30 @@ def draw_landmark_coordinates(
     smooth_by_name = {
         keypoint.name: keypoint for keypoint in pose_frame.smoothed_keypoints
     }
-    out_count = count_out_of_frame(pose_frame.raw_keypoints)
-    total = len(pose_frame.raw_keypoints)
+    valid_count = count_valid(pose_frame.smoothed_keypoints)
+    total = len(pose_frame.smoothed_keypoints)
+    min_visibility = smoothing.min_visibility if smoothing is not None else 0.5
     alpha = smoothing.alpha if smoothing is not None else float("nan")
-    smoothing_on = smoothing.enabled if smoothing is not None else True
 
     lines = [
-        "Smoothed skeleton (cyan)  raw joints (red)",
+        "Valid smoothed 2D pixels only",
         f"Frame {pose_frame.frame_width}x{pose_frame.frame_height}  "
-        f"EMA alpha={alpha:.2f} {'on' if smoothing_on else 'off'}",
-        f"Raw out-of-frame: {out_count}/{total} (not clamped)",
-        "name  raw px  |  smooth px",
+        f"vis>={min_visibility:.2f}  EMA a={alpha:.2f}",
+        f"Valid joints: {valid_count}/{total}",
     ]
     for name in landmark_names:
-        raw = raw_by_name.get(name)
         smooth = smooth_by_name.get(name)
-        if raw is None or smooth is None:
+        if smooth is None:
             lines.append(f"{_short_name(name)}: not detected")
             continue
-        raw_status = describe_frame_position(
-            raw.x,
-            raw.y,
-            pose_frame.frame_width,
-            pose_frame.frame_height,
-        )
-        smooth_status = describe_frame_position(
-            smooth.x,
-            smooth.y,
-            pose_frame.frame_width,
-            pose_frame.frame_height,
-        )
+        if not smooth.is_valid:
+            raw = raw_by_name.get(name, smooth)
+            reason = describe_invalid_reason(raw, min_visibility)
+            lines.append(f"{_short_name(name)}: hidden ({reason})")
+            continue
         lines.append(
             f"{_short_name(name)}  "
-            f"r=({raw.x:.1f},{raw.y:.1f}) {raw_status}  "
-            f"s=({smooth.x:.1f},{smooth.y:.1f}) {smooth_status}"
+            f"({smooth.x:.1f}, {smooth.y:.1f})  vis={smooth.visibility:.2f}"
         )
 
     _draw_text_panel(frame, lines, top_right=True)
@@ -227,7 +183,6 @@ def draw_pose_on_frame(
         return canvas
 
     draw_pose_skeleton(canvas, pose_frame.smoothed_keypoints)
-    draw_raw_keypoints(canvas, pose_frame.raw_keypoints)
     draw_landmark_coordinates(canvas, pose_frame, smoothing=smoothing)
     return canvas
 
