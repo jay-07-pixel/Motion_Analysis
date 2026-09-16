@@ -15,6 +15,8 @@ from motion_analysis.pose.landmarks import (
     extract_landmarks,
 )
 from motion_analysis.pose.model import load_pose_landmarker_model
+from motion_analysis.pose.smoothing import KeypointSmoother, SmoothingConfig
+from motion_analysis.pose.validation import validate_pixel_keypoints
 
 try:
     import cv2
@@ -188,6 +190,8 @@ class PoseEstimator:
         min_detection_confidence: Forwarded to initialize_pose_detector().
         min_tracking_confidence: Forwarded to initialize_pose_detector().
         model_complexity: Forwarded to initialize_pose_detector().
+        smoothing: EMA filter settings. If omitted, SmoothingConfig defaults
+            are used.
     """
 
     def __init__(
@@ -195,48 +199,56 @@ class PoseEstimator:
         min_detection_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
         model_complexity: int = 1,
+        smoothing: SmoothingConfig | None = None,
     ) -> None:
         self._detector = initialize_pose_detector(
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
             model_complexity=model_complexity,
         )
+        self.smoothing = smoothing or SmoothingConfig()
+        self._smoother = KeypointSmoother(self.smoothing)
 
     def estimate(self, frame_bgr: np.ndarray) -> Optional[PoseFrame]:
-        """Detect pose and convert landmarks to pixel coordinates.
+        """Detect pose, validate pixels, and return raw plus smoothed keypoints.
 
         Width and height are taken from the current frame shape so coordinate
-        conversion follows the live RealSense resolution.
+        conversion and in-frame checks follow the live RealSense resolution.
 
         Args:
             frame_bgr: BGR image from the RealSense RGB stream.
 
         Returns:
-            PoseFrame with normalized landmarks and pixel keypoints, or None
-            when no person is detected.
+            PoseFrame with normalized landmarks, raw pixel keypoints, and
+            smoothed pixel keypoints, or None when no person is detected.
 
         Raises:
             PoseDetectionError: If inference or coordinate conversion fails.
         """
         pose_landmarks = detect_pose(self._detector, frame_bgr)
         if pose_landmarks is None:
+            self._smoother.mark_missing()
             return None
 
         # Use the live frame size, never a hard-coded resolution.
         frame_height, frame_width = frame_bgr.shape[:2]
         normalized = extract_landmarks(pose_landmarks)
-        pixels = convert_to_pixel_coordinates(normalized, frame_width, frame_height)
+        converted = convert_to_pixel_coordinates(normalized, frame_width, frame_height)
+        raw = validate_pixel_keypoints(converted, frame_width, frame_height)
+        smoothed = self._smoother.update(raw, frame_width, frame_height)
         return PoseFrame(
             frame_width=frame_width,
             frame_height=frame_height,
             normalized_landmarks=normalized,
-            pixel_keypoints=pixels,
+            raw_keypoints=raw,
+            smoothed_keypoints=smoothed,
         )
 
     def close(self) -> None:
         """Close the underlying MediaPipe Pose detector."""
         close_pose_detector(self._detector)
         self._detector = None
+        self._smoother.reset()
 
     def __enter__(self) -> PoseEstimator:
         return self

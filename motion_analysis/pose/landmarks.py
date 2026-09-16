@@ -10,6 +10,11 @@ frame size:
     pixel_x = normalized_x * frame_width
     pixel_y = normalized_y * frame_height
 
+MediaPipe may return normalized x or y outside [0, 1] when a joint is
+off-screen or inferred beyond the image. The converted pixel values are
+kept as-is and later marked in-frame or out-of-frame. They are not clamped.
+
+
 The motion-analysis pipeline uses PixelKeypoint values only.
 """
 
@@ -80,8 +85,10 @@ class NormalizedLandmark:
 
     Attributes:
         name: MediaPipe landmark name, for example LEFT_SHOULDER.
-        x: Horizontal position in [0, 1] relative to image width. Not pixels.
-        y: Vertical position in [0, 1] relative to image height. Not pixels.
+        x: Horizontal position as a fraction of image width. Not pixels.
+            May be outside [0, 1] when the joint is beyond the frame.
+        y: Vertical position as a fraction of image height. Not pixels.
+            May be outside [0, 1] when the joint is beyond the frame.
         visibility: MediaPipe visibility score in [0, 1].
     """
 
@@ -102,12 +109,16 @@ class PixelKeypoint:
         x: Horizontal pixel coordinate (column) in the current frame.
         y: Vertical pixel coordinate (row) in the current frame.
         visibility: MediaPipe visibility score copied from the landmark.
+        in_frame: True when (x, y) lies on a visible pixel of the current
+            frame. Out-of-frame points keep their estimated x/y; they are
+            not clamped onto the image border.
     """
 
     name: str
     x: float
     y: float
     visibility: float
+    in_frame: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,13 +129,25 @@ class PoseFrame:
         frame_width: Width of the frame used for conversion, in pixels.
         frame_height: Height of the frame used for conversion, in pixels.
         normalized_landmarks: MediaPipe coordinates in the 0-1 image space.
-        pixel_keypoints: Converted 2D keypoints in pixel coordinates.
+        raw_keypoints: Unfiltered pixel keypoints, including out-of-frame
+            estimates.
+        smoothed_keypoints: Filtered pixel keypoints used for display.
     """
 
     frame_width: int
     frame_height: int
     normalized_landmarks: list[NormalizedLandmark]
-    pixel_keypoints: list[PixelKeypoint]
+    raw_keypoints: list[PixelKeypoint]
+    smoothed_keypoints: list[PixelKeypoint]
+
+    @property
+    def pixel_keypoints(self) -> list[PixelKeypoint]:
+        """Smoothed pixel keypoints used for drawing and later analysis.
+
+        Returns:
+            The smoothed keypoint list. Raw values remain on ``raw_keypoints``.
+        """
+        return self.smoothed_keypoints
 
 
 def extract_landmarks(pose_landmarks: object) -> list[NormalizedLandmark]:
@@ -184,8 +207,10 @@ def normalized_to_pixel(
     """Convert one MediaPipe normalized coordinate to pixel coordinates.
 
     Args:
-        x_normalized: Landmark x in [0, 1] relative to image width.
-        y_normalized: Landmark y in [0, 1] relative to image height.
+        x_normalized: Landmark x as a fraction of image width. May be outside
+            [0, 1] if MediaPipe infers a joint beyond the frame.
+        y_normalized: Landmark y as a fraction of image height. May be outside
+            [0, 1] if MediaPipe infers a joint beyond the frame.
         frame_width: Current frame width in pixels from `frame.shape[1]`.
         frame_height: Current frame height in pixels from `frame.shape[0]`.
 
@@ -230,6 +255,8 @@ def convert_to_pixel_coordinates(
             frame_width,
             frame_height,
         )
+        # Keep values even if they fall outside the image. Validation flags
+        # them later instead of clamping onto the frame border.
         keypoints.append(
             PixelKeypoint(
                 name=landmark.name,

@@ -2,7 +2,8 @@
 
 The live pipeline is:
 
-    RealSense D455F -> RGB frame -> MediaPipe Pose -> 2D pixel keypoints
+    RealSense D455F -> RGB frame -> MediaPipe Pose -> raw pixels ->
+    in-frame validation -> EMA smoothing -> display
 """
 
 __version__ = "0.1.0"

@@ -4,9 +4,9 @@ Live RGB capture and 2D human pose detection for a motion analysis system built 
 
 Current pipeline:
 
-**RealSense D455F → RGB frame → MediaPipe Pose → 2D body landmarks → pixel coordinates (x, y)**
+**RealSense D455F → RGB frame → MediaPipe Pose → raw pixel keypoints → validate in-frame → EMA smoothing → display smoothed skeleton**
 
-Depth, 3D coordinates, velocity, acceleration, joint angles, trajectories, uploaded video, and a custom UI are not included yet.
+The live overlay shows both **raw** and **smoothed** pixel coordinates so you can compare stability. Depth, 3D coordinates, velocity, acceleration, joint angles, trajectories, uploaded video, and a custom UI are not included yet.
 
 ## Project purpose
 
@@ -14,7 +14,9 @@ Depth, 3D coordinates, velocity, acceleration, joint angles, trajectories, uploa
 - Stream live RGB without hard-coded resolution or FPS
 - Run MediaPipe Pose on each RGB frame
 - Convert normalized MediaPipe landmarks into 2D pixel coordinates using the current frame size
-- Draw the pose skeleton and a live keypoint readout
+- Validate those pixels against the live frame without clamping off-screen joints
+- Smooth raw keypoints with a configurable EMA filter while keeping the raw values
+- Draw the smoothed pose skeleton and a raw-vs-smoothed coordinate readout
 - Shut down the camera, pose model, and OpenCV window cleanly
 
 ## Requirements
@@ -99,16 +101,66 @@ The converted values are `PixelKeypoint` objects:
 - `name`: landmark name, for example `LEFT_SHOULDER`
 - `x`: pixel column in the current RGB frame
 - `y`: pixel row in the current RGB frame
+- `in_frame`: whether that pixel actually lies on the image
 
-**Use `PixelKeypoint` for motion analysis.** Do not treat MediaPipe's normalized `x` and `y` as pixels.
+**Use smoothed `PixelKeypoint` values for display.** Raw values stay available on `PoseFrame.raw_keypoints`. Do not treat MediaPipe's normalized `x` and `y` as pixels.
 
-The live overlay shows both spaces for testing, for example:
+## Why raw keypoints fluctuate
+
+MediaPipe re-estimates every joint on every frame. Even if you stand still, the detector's confidence, lighting, compression, and small model updates move the landmark by a few pixels. That jitter is measurement noise, not real motion. Using those raw points directly would make later velocity or angle calculations look noisy.
+
+## How coordinates are validated
+
+MediaPipe's normalized `x` and `y` are **not guaranteed to stay in `[0, 1]`**. If a foot is cut off at the bottom of the camera, or the model infers a joint just beyond the image, `normalized_y` can be `1.05`. On a 720-pixel-tall frame that becomes:
 
 ```text
-LEFT_SHOULDER: px=(412.3, 210.1)  norm=(0.322, 0.292)
+pixel_y = 1.05 * 720 = 756
 ```
 
-`px=` is the system 2D keypoint. `norm=` is the raw MediaPipe coordinate.
+which is greater than 720. That is not a conversion bug.
+
+Visible pixels occupy `[0, width) x [0, height)`. A point with `y == 720` on a 720-tall image is already outside the last row (row index 719).
+
+Validation therefore:
+
+1. Converts with the **current** `frame.shape` width and height
+2. Marks `in_frame = True` only when `0 <= x < width` and `0 <= y < height`
+3. **Does not clamp** out-of-frame points onto the border, because clamping would invent a false on-screen joint
+4. Skips out-of-frame landmarks when drawing the skeleton
+5. By default, does not let out-of-frame raw samples update the smoother
+
+The overlay labels these points `OUT y>=h` (or `x<0`, `x>=w`, `y<0`) next to the raw coordinate.
+
+## What smoothing does
+
+An exponential moving average (EMA) blends each new raw sample with the previous smoothed position:
+
+```text
+smoothed = alpha * raw + (1 - alpha) * previous_smoothed
+```
+
+- Smaller `alpha` → less jitter, more lag
+- Larger `alpha` → follows motion faster, more residual noise
+- Default `alpha = 0.35`
+
+Change this by passing a `SmoothingConfig` into `PoseEstimator`. The values are not hard-coded inside the filter math.
+
+Both series are kept:
+
+- `PoseFrame.raw_keypoints` — unfiltered detector output
+- `PoseFrame.smoothed_keypoints` — EMA output used for the cyan skeleton
+
+If a raw joint is out of frame or low-visibility, the filter **holds** the last in-frame smoothed position instead of following the invalid estimate off-screen.
+
+The live overlay prints both so you can compare stability:
+
+```text
+L.ANK  r=(610.2,742.8) OUT y>=h  s=(608.1,715.2) IN
+```
+
+`r=` is raw. `s=` is smoothed. Red dots on the video are raw in-frame joints; the cyan skeleton is smoothed.
+
+The live overlay also still shows MediaPipe normalized values only as an explanation in the README; the on-screen panel now compares raw vs smoothed **pixels**.
 
 ## Expected output
 
@@ -118,7 +170,8 @@ The terminal prints the detected camera and confirms Pose is ready:
 Connected: Intel RealSense D455 (XXXXXXXX)
 Resolution: 1280 x 720
 Camera FPS: 30.0
-MediaPipe Pose ready. 2D keypoints are reported in pixel coordinates.
+MediaPipe Pose ready. Display uses smoothed pixel keypoints.
+Smoothing: EMA alpha=0.35, hold_out_of_frame=True.
 Press Q or Esc in the video window to quit.
 ```
 
@@ -126,8 +179,10 @@ An OpenCV window titled **2D Motion Analysis - Live RGB Pose** shows:
 
 - The live RGB video
 - Camera name, serial number, actual stream resolution, and FPS (top-left)
-- The pose skeleton drawn from pixel keypoints
-- A readout of useful body landmarks with pixel and normalized coordinates (top-right)
+- The **smoothed** pose skeleton in cyan
+- Raw in-frame joints as small red dots, so leftover jitter is visible
+- A readout of useful body landmarks with **raw vs smoothed** pixel coordinates
+- `OUT` labels when a raw estimate is outside the current frame
 - `No person detected` when nobody is in view
 
 Stand in front of the camera so the full body is visible. Shoulders, elbows, wrists, hips, knees, and ankles should track on the skeleton, and the overlay should list their pixel `(x, y)` values.
@@ -154,7 +209,8 @@ If no camera is connected, the program exits with a clear error instead of openi
 | `MediaPipe is not installed` | Pose dependency missing | Run `pip install -r requirements.txt` inside the virtual environment. |
 | `Could not download the MediaPipe Pose Landmarker model` | First run has no internet | Connect to the internet once so the official `.task` model can be cached, then rerun. |
 | Overlay shows `No person detected` | Person too close, too far, or poorly lit | Step back so more of the body is visible and add more light. |
-| Skeleton jitter or missing limbs | Occlusion or low visibility | Face the camera, keep joints in view, and avoid motion blur. |
+| Overlay shows `OUT y>=h` or similar | Joint is off-screen or inferred beyond the image | Step back so the full body fits. The estimate is kept but not clamped or drawn as an on-screen joint. |
+| Skeleton jitter or missing limbs | Occlusion, low visibility, or raw (unsmoothed) noise | Face the camera and keep joints in view. Lower `SmoothingConfig.alpha` for more filtering. |
 | Coordinates look wrong for the image size | Using normalized values as pixels | Use the `px=` values. `norm=` is MediaPipe's 0–1 space and is not a pixel location. |
 
 After any camera or pose initialization error the program stops the RealSense pipeline, closes MediaPipe Pose, and closes OpenCV windows so the device is not left locked.

@@ -13,6 +13,7 @@ from motion_analysis.pose import (
     PoseDetectionError,
     PoseEstimator,
     PoseInitializationError,
+    SmoothingConfig,
     draw_pose_on_frame,
 )
 
@@ -33,8 +34,13 @@ def run_live_rgb() -> int:
         print(f"Resolution: {metadata.width} x {metadata.height}")
         print(f"Camera FPS: {metadata.stream_fps:.1f}")
 
-        estimator = PoseEstimator()
-        print("MediaPipe Pose ready. 2D keypoints are reported in pixel coordinates.")
+        estimator = PoseEstimator(smoothing=SmoothingConfig())
+        print("MediaPipe Pose ready. Display uses smoothed pixel keypoints.")
+        print(
+            "Smoothing: EMA "
+            f"alpha={estimator.smoothing.alpha:.2f}, "
+            f"hold_out_of_frame={estimator.smoothing.hold_when_out_of_frame}."
+        )
         print("Press Q or Esc in the video window to quit.")
 
         while True:
@@ -46,7 +52,12 @@ def run_live_rgb() -> int:
             except PoseDetectionError as exc:
                 pose_error = str(exc)
 
-            annotated = draw_pose_on_frame(frame, pose_frame, error_message=pose_error)
+            annotated = draw_pose_on_frame(
+                frame,
+                pose_frame,
+                error_message=pose_error,
+                smoothing=estimator.smoothing,
+            )
             if not viewer.show(annotated, camera.get_metadata()):
                 break
         return 0
