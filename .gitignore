@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+*.log
+.DS_Store
+Thumbs.db
+*.task
+motion_analysis/pose/_models/
