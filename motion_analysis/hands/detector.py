@@ -146,6 +146,9 @@ def detect_hands(detector: HandDetector, frame_bgr: np.ndarray) -> list[tuple[st
         ) from exc
 
     rgb_frame = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+    # Color conversion only. Do not resize, crop, flip, or pad: landmark
+    # x/y are converted with this same frame's width and height, which is
+    # also the image later shown in the OpenCV window.
     try:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         result = detector.landmarker.detect_for_video(
@@ -259,6 +262,8 @@ class HandsEstimator:
             HandsDetectionError: If inference or coordinate conversion fails.
         """
         detections = detect_hands(self._detector, frame_bgr)
+        # Conversion uses the BGR frame that will be displayed, not a
+        # resized or mirrored copy sent only to MediaPipe.
         frame_height, frame_width = frame_bgr.shape[:2]
         if not detections:
             for smoother in self._smoothers.values():

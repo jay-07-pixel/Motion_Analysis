@@ -237,6 +237,29 @@ def normalized_to_pixel(
     return x_normalized * frame_width, y_normalized * frame_height
 
 
+def pixel_to_draw_xy(x: float, y: float) -> tuple[int, int]:
+    """Map a stored sub-pixel landmark to the OpenCV drawing pixel.
+
+    Stored coordinates keep the float result of::
+
+        x_pixel = x_normalized * frame_width
+        y_pixel = y_normalized * frame_height
+
+    OpenCV drawing APIs require integers. This rounds to the nearest pixel
+    and does **not** scale, flip, crop, or add an offset. Overlay text that
+    prints a ``drawn`` coordinate must use this same pair so the printed
+    value matches the marker on the displayed image.
+
+    Args:
+        x: Stored horizontal pixel coordinate.
+        y: Stored vertical pixel coordinate.
+
+    Returns:
+        Integer ``(column, row)`` passed to ``cv2.circle`` / ``cv2.line``.
+    """
+    return int(round(x)), int(round(y))
+
+
 def convert_to_pixel_coordinates(
     landmarks: list[NormalizedLandmark],
     frame_width: int,

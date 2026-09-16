@@ -19,7 +19,15 @@ from motion_analysis.pose.landmarks import (
     convert_to_pixel_coordinates,
 )
 
-# 21 landmarks per hand, in MediaPipe Hands index order, using concise names.
+# 21 landmarks per hand, in official MediaPipe Hands index order (0..20).
+# Names match the model indices; INDEX/MIDDLE/RING drop the "_FINGER" infix
+# used in some MediaPipe docs, but the index mapping is the same:
+#   0 WRIST
+#   1-4 THUMB_CMC, THUMB_MCP, THUMB_IP, THUMB_TIP
+#   5-8 INDEX_MCP, INDEX_PIP, INDEX_DIP, INDEX_TIP
+#   9-12 MIDDLE_MCP, MIDDLE_PIP, MIDDLE_DIP, MIDDLE_TIP
+#   13-16 RING_MCP, RING_PIP, RING_DIP, RING_TIP
+#   17-20 PINKY_MCP, PINKY_PIP, PINKY_DIP, PINKY_TIP
 HAND_LANDMARK_NAMES: tuple[str, ...] = (
     "WRIST",
     "THUMB_CMC",
@@ -90,8 +98,9 @@ class HandFrame:
         frame_width: Width of the frame used for conversion, in pixels.
         frame_height: Height of the frame used for conversion, in pixels.
         normalized_landmarks: MediaPipe 0-1 coordinates for all 21 points.
-        raw_keypoints: Unfiltered pixel keypoints.
-        smoothed_keypoints: Filtered pixel keypoints used for drawing.
+        raw_keypoints: Unfiltered pixel keypoints. Drawn as red crosses.
+        smoothed_keypoints: Filtered pixel keypoints. Drawn as cyan/green dots
+            and used for motion measurements.
     """
 
     handedness: str
@@ -120,6 +129,13 @@ class HandsFrame:
 
 def extract_hand_landmarks(hand_landmarks: object) -> list[NormalizedLandmark]:
     """Extract the 21 named landmarks from one MediaPipe hand.
+
+    MediaPipe Hands returns landmarks in a fixed index order. This function
+    assigns ``HAND_LANDMARK_NAMES[i]`` to landmark ``i`` so INDEX_TIP is
+    always index 8, not a renamed nearby joint.
+
+    The x and y values stay in MediaPipe's image-normalized space. They are
+    not pixels and are not clamped.
 
     Args:
         hand_landmarks: Sequence of MediaPipe landmark objects, or an object
@@ -153,6 +169,10 @@ def extract_hand_landmarks(hand_landmarks: object) -> list[NormalizedLandmark]:
             visibility = getattr(landmark, "presence", None)
         # Hands often omit per-landmark visibility; a detected hand still
         # provides useful 2D finger points, so missing scores default to 1.
+        if getattr(landmark, "x", None) is None or getattr(landmark, "y", None) is None:
+            raise HandsDetectionError(
+                f"MediaPipe Hands landmark {index} is missing x or y."
+            )
         extracted.append(
             NormalizedLandmark(
                 name=name,
@@ -171,13 +191,19 @@ def hand_landmarks_to_pixels(
 ) -> list[PixelKeypoint]:
     """Convert one hand's normalized landmarks to pixel keypoints.
 
+    Uses the same conversion as body pose, with the size of the frame that
+    will be displayed (no extra scale, crop, flip, or pad)::
+
+        pixel_x = normalized_x * frame_width
+        pixel_y = normalized_y * frame_height
+
     Args:
         landmarks: Normalized MediaPipe hand landmarks.
-        frame_width: Current frame width in pixels.
-        frame_height: Current frame height in pixels.
+        frame_width: Current frame width in pixels from ``frame.shape[1]``.
+        frame_height: Current frame height in pixels from ``frame.shape[0]``.
 
     Returns:
         PixelKeypoint list using the current frame size, not hard-coded
-        resolution values.
+        resolution values. Out-of-frame estimates are kept, not clamped.
     """
     return convert_to_pixel_coordinates(landmarks, frame_width, frame_height)

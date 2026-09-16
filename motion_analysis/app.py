@@ -84,7 +84,8 @@ def run_session(
             display_frame = draw_motion_analysis(
                 last_result.annotated,
                 processor.current_measurement(),
-                processor.selected_keypoint(last_result),
+                selected_keypoint=processor.selected_keypoint(last_result),
+                selected_raw=_selected_raw(processor, last_result),
             )
             extra_lines = _overlay_lines(source, is_video, paused)
             action = viewer.show(
@@ -126,6 +127,20 @@ def run_session(
             processor.close()
         viewer.close()
         source.close()
+
+
+def _selected_raw(processor: FrameProcessor, result: ProcessedFrame):
+    """Return the selected landmark's raw keypoint when it exists.
+
+    Args:
+        processor: Active frame processor with the current landmark target.
+        result: Latest pipeline output.
+
+    Returns:
+        Raw PixelKeypoint, or None if that joint was not detected.
+    """
+    observation = processor.selected_observation(result)
+    return observation.raw if observation is not None else None
 
 
 def _frame_timestamp(source: FrameSource) -> float:

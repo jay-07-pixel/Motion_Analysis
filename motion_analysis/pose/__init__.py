@@ -23,6 +23,7 @@ from motion_analysis.pose.landmarks import (
     convert_to_pixel_coordinates,
     extract_landmarks,
     normalized_to_pixel,
+    pixel_to_draw_xy,
 )
 from motion_analysis.pose.smoothing import KeypointSmoother, SmoothingConfig
 from motion_analysis.pose.validation import (
@@ -59,6 +60,7 @@ __all__ = [
     "is_landmark_valid",
     "is_visible_enough",
     "normalized_to_pixel",
+    "pixel_to_draw_xy",
     "valid_keypoints",
     "validate_pixel_keypoints",
 ]

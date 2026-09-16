@@ -11,6 +11,7 @@ from motion_analysis.pose.landmarks import (
     TEST_LANDMARK_NAMES,
     PixelKeypoint,
     PoseFrame,
+    pixel_to_draw_xy,
 )
 from motion_analysis.pose.smoothing import SmoothingConfig
 from motion_analysis.pose.validation import count_valid, describe_invalid_reason
@@ -208,7 +209,7 @@ def _short_name(name: str) -> str:
 
 
 def _as_drawing_point(keypoint: PixelKeypoint) -> tuple[int, int]:
-    """Round a pixel keypoint to an OpenCV drawing coordinate.
+    """Integer image pixel for this keypoint, matching printed ``drawn`` coords.
 
     Args:
         keypoint: Landmark already expressed in pixels.
@@ -216,7 +217,7 @@ def _as_drawing_point(keypoint: PixelKeypoint) -> tuple[int, int]:
     Returns:
         Integer (x, y) suitable for cv2.line and cv2.circle.
     """
-    return int(round(keypoint.x)), int(round(keypoint.y))
+    return pixel_to_draw_xy(keypoint.x, keypoint.y)
 
 
 def _draw_text_panel(

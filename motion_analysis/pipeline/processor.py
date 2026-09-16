@@ -19,6 +19,7 @@ from motion_analysis.hands import (
 )
 from motion_analysis.hands.landmarks import HandsFrame
 from motion_analysis.motion.landmarks import (
+    KeypointObservation,
     LandmarkTarget,
     collect_observations,
     cycle_landmark,
@@ -64,6 +65,7 @@ def process_rgb_frame(
     pose_estimator: PoseEstimator,
     hands_estimator: HandsEstimator,
     smoothing: SmoothingConfig,
+    selected_landmark: Optional[LandmarkTarget] = None,
 ) -> ProcessedFrame:
     """Run the shared 2D pipeline on one RGB frame.
 
@@ -71,11 +73,17 @@ def process_rgb_frame(
 
         RGB → Pose + Hands → validation → smoothing → 2D pixel keypoints
 
+    The displayed canvas is a copy of ``frame`` at the same width/height.
+    Landmark pixels are converted from that size, then drawn with
+    ``pixel_to_draw_xy`` so markers sit on the stored coordinates.
+
     Args:
-        frame: BGR image from any FrameSource.
+        frame: BGR image from any FrameSource. Not resized before detection
+            or display.
         pose_estimator: Initialized MediaPipe Pose estimator.
         hands_estimator: Initialized MediaPipe Hands estimator.
         smoothing: Shared validity and EMA settings.
+        selected_landmark: Optional catalog target to highlight on hands.
 
     Returns:
         Annotated image plus internal raw/smoothed pose and hand results.
@@ -93,6 +101,11 @@ def process_rgb_frame(
     except HandsDetectionError as exc:
         hands_error = str(exc)
 
+    observations = collect_observations(pose_frame, hands_frame)
+    selected_obs = (
+        observations.get(selected_landmark.key) if selected_landmark is not None else None
+    )
+
     annotated = draw_pose_on_frame(
         frame,
         pose_frame,
@@ -104,6 +117,10 @@ def process_rgb_frame(
         hands_frame,
         error_message=hands_error,
         smoothing=smoothing,
+        selected_key=selected_landmark.key if selected_landmark is not None else None,
+        selected_label=selected_landmark.label if selected_landmark is not None else None,
+        selected_raw=selected_obs.raw if selected_obs is not None else None,
+        selected_smoothed=selected_obs.smoothed if selected_obs is not None else None,
     )
     return ProcessedFrame(
         annotated=annotated,
@@ -160,6 +177,7 @@ class FrameProcessor:
             self.pose_estimator,
             self.hands_estimator,
             self.smoothing,
+            selected_landmark=self.selected_landmark,
         )
         self._frame_index += 1
         self.motion_tracker.update(
@@ -183,6 +201,21 @@ class FrameProcessor:
         """
         return self.motion_tracker.snapshot(self.selected_landmark)
 
+    def selected_observation(
+        self, result: ProcessedFrame
+    ) -> Optional[KeypointObservation]:
+        """Return raw and smoothed pixels for the selected landmark.
+
+        Args:
+            result: Latest shared-pipeline output.
+
+        Returns:
+            The observation pair, or None if that landmark is absent. Missing
+            detections are not an error; the overlay prints "not detected".
+        """
+        observations = collect_observations(result.pose_frame, result.hands_frame)
+        return observations.get(self.selected_landmark.key)
+
     def selected_keypoint(self, result: ProcessedFrame) -> Optional[PixelKeypoint]:
         """Find the current smoothed keypoint for the selected landmark.
 
@@ -192,8 +225,7 @@ class FrameProcessor:
         Returns:
             The smoothed PixelKeypoint, or None if it is absent this frame.
         """
-        observations = collect_observations(result.pose_frame, result.hands_frame)
-        observation = observations.get(self.selected_landmark.key)
+        observation = self.selected_observation(result)
         return observation.smoothed if observation is not None else None
 
     def cycle_selected_landmark(self, step: int) -> LandmarkTarget:

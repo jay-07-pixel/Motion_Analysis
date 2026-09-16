@@ -1,4 +1,8 @@
-"""Overlay for the selected landmark's 2D motion measurements."""
+"""Overlay for the selected landmark's 2D motion measurements.
+
+Highlight markers use ``pixel_to_draw_xy`` so the printed ``drawn`` pixel is
+the same integer passed to OpenCV. No extra scale, crop, or flip is applied.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +13,10 @@ import numpy as np
 
 from motion_analysis.motion.geometry import Point2D
 from motion_analysis.motion.tracker import MotionMeasurement
-from motion_analysis.pose.landmarks import PixelKeypoint
+from motion_analysis.pose.landmarks import PixelKeypoint, pixel_to_draw_xy
 
 _HIGHLIGHT_COLOR = (255, 0, 255)
+_RAW_COLOR = (0, 0, 255)
 _LABEL_COLOR = (255, 255, 255)
 
 
@@ -19,6 +24,7 @@ def draw_motion_analysis(
     frame: np.ndarray,
     measurement: MotionMeasurement,
     selected_keypoint: Optional[PixelKeypoint] = None,
+    selected_raw: Optional[PixelKeypoint] = None,
 ) -> np.ndarray:
     """Copy a pose/hands frame and add the selected-landmark readout.
 
@@ -26,22 +32,34 @@ def draw_motion_analysis(
         frame: BGR image already annotated with skeleton and hands.
         measurement: Snapshot for the user-selected landmark.
         selected_keypoint: Current smoothed keypoint, highlighted when valid.
+        selected_raw: Current raw keypoint, highlighted in red when valid.
 
     Returns:
         Annotated copy. The input frame is not modified.
     """
     canvas = frame.copy()
+    if selected_raw is not None and selected_raw.is_valid:
+        _highlight_keypoint(canvas, selected_raw, _RAW_COLOR)
     if selected_keypoint is not None and selected_keypoint.is_valid:
-        _highlight_keypoint(canvas, selected_keypoint)
-    _draw_text_panel(canvas, _measurement_lines(measurement))
+        _highlight_keypoint(canvas, selected_keypoint, _HIGHLIGHT_COLOR)
+    _draw_text_panel(
+        canvas,
+        _measurement_lines(measurement, selected_raw, selected_keypoint),
+    )
     return canvas
 
 
-def _measurement_lines(measurement: MotionMeasurement) -> list[str]:
+def _measurement_lines(
+    measurement: MotionMeasurement,
+    selected_raw: Optional[PixelKeypoint],
+    selected_smoothed: Optional[PixelKeypoint],
+) -> list[str]:
     """Build overlay rows for position, displacement, and path length.
 
     Args:
         measurement: Snapshot produced by MotionTracker.
+        selected_raw: Raw selected keypoint for coordinate printout.
+        selected_smoothed: Smoothed selected keypoint for coordinate printout.
 
     Returns:
         Text lines for the bottom-left panel.
@@ -56,6 +74,8 @@ def _measurement_lines(measurement: MotionMeasurement) -> list[str]:
         f"Landmark: {measurement.landmark.label}",
         f"t = {measurement.timestamp_seconds:.3f}s   source FPS = {fps_text}",
         "[ / ] change landmark",
+        _format_selected_pixels("RAW", selected_raw),
+        _format_selected_pixels("SMOOTH", selected_smoothed),
     ]
     if not measurement.is_valid:
         lines.append(f"Position: not calculated ({measurement.invalid_reason})")
@@ -85,6 +105,27 @@ def _measurement_lines(measurement: MotionMeasurement) -> list[str]:
     return lines
 
 
+def _format_selected_pixels(label: str, keypoint: Optional[PixelKeypoint]) -> str:
+    """Print stored floats and the exact integer pixel used for the marker.
+
+    Args:
+        label: ``RAW`` or ``SMOOTH``.
+        keypoint: Selected landmark, or None if it is missing this frame.
+
+    Returns:
+        One overlay line. ``drawn`` is ``pixel_to_draw_xy(x, y)``.
+    """
+    if keypoint is None:
+        return f"{label}: not detected"
+    if not keypoint.is_valid:
+        return f"{label}: not drawn (invalid)"
+    drawn = pixel_to_draw_xy(keypoint.x, keypoint.y)
+    return (
+        f"{label} stored ({keypoint.x:.2f}, {keypoint.y:.2f})  "
+        f"drawn {drawn}"
+    )
+
+
 def _format_point(point: Point2D) -> str:
     """Format a pixel point for the overlay.
 
@@ -97,16 +138,21 @@ def _format_point(point: Point2D) -> str:
     return f"({point.x:.1f}, {point.y:.1f})"
 
 
-def _highlight_keypoint(frame: np.ndarray, keypoint: PixelKeypoint) -> None:
-    """Mark the analysed joint so it is easy to see.
+def _highlight_keypoint(
+    frame: np.ndarray,
+    keypoint: PixelKeypoint,
+    color: tuple[int, int, int],
+) -> None:
+    """Mark the analysed joint at the same pixel as its hand/body marker.
 
     Args:
         frame: BGR image modified in place.
-        keypoint: Valid smoothed landmark.
+        keypoint: Valid landmark whose stored x/y are used with no extra offset.
+        color: BGR highlight color.
     """
-    center = (int(round(keypoint.x)), int(round(keypoint.y)))
-    cv2.circle(frame, center, 12, _HIGHLIGHT_COLOR, 2, cv2.LINE_AA)
-    cv2.circle(frame, center, 4, _HIGHLIGHT_COLOR, -1, cv2.LINE_AA)
+    center = pixel_to_draw_xy(keypoint.x, keypoint.y)
+    cv2.circle(frame, center, 10, color, 2, cv2.LINE_AA)
+    cv2.circle(frame, center, 1, color, -1, cv2.LINE_AA)
 
 
 def _draw_text_panel(frame: np.ndarray, lines: list[str]) -> None:
